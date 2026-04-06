@@ -9,6 +9,8 @@ wheels/
 # Virtual environments
 .venv/
 
+.hf_cache/
+
 # Logs
 logs/
 */logs/
@@ -20,3 +22,4 @@ logs/
 .claude/
 .vscode/
 .idea/
+
