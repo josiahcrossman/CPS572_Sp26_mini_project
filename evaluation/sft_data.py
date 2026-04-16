@@ -118,20 +118,8 @@ def load_opencode_conversations(n: int, seed: int, *, cache_dir: str | None = No
     return convos
 
 
-def load_mixed_sft_conversations(
-    n_gsm8k: int,
-    n_tulu: int,
-    n_code: int,
-    seed: int,
-    *,
-    cache_dir: str | None = None,
-) -> tuple[list[Conversation], dict[str, Any]]:
-    """Load and concatenate three sources; returns (conversations, stats dict)."""
-    cache_dir = cache_dir or _cache_dir()
-    gsm = load_gsm8k_conversations(n_gsm8k, seed, cache_dir=cache_dir)
-    tulu = load_tulu_conversations(n_tulu, seed, cache_dir=cache_dir)
-    code = load_opencode_conversations(n_code, seed, cache_dir=cache_dir)
-    stats = {
+def _build_stats(n_gsm8k, n_tulu, n_code, gsm, tulu, code, seed, cache_dir):
+    return {
         "n_gsm8k_requested": n_gsm8k,
         "n_tulu_requested": n_tulu,
         "n_code_requested": n_code,
@@ -146,4 +134,39 @@ def load_mixed_sft_conversations(
             "nvidia/OpenCodeInstruct (train)",
         ],
     }
+
+
+def load_mixed_sft_conversations(
+    n_gsm8k: int,
+    n_tulu: int,
+    n_code: int,
+    seed: int,
+    *,
+    cache_dir: str | None = None,
+) -> tuple[list[Conversation], dict[str, Any]]:
+    """Load and concatenate three sources; returns (conversations, stats dict)."""
+    cache_dir = cache_dir or _cache_dir()
+    gsm = load_gsm8k_conversations(n_gsm8k, seed, cache_dir=cache_dir)
+    tulu = load_tulu_conversations(n_tulu, seed, cache_dir=cache_dir)
+    code = load_opencode_conversations(n_code, seed, cache_dir=cache_dir)
+    stats = _build_stats(n_gsm8k, n_tulu, n_code, gsm, tulu, code, seed, cache_dir)
     return gsm + tulu + code, stats
+
+
+def load_mixed_sft_conversations_tagged(
+    n_gsm8k: int,
+    n_tulu: int,
+    n_code: int,
+    seed: int,
+    *,
+    cache_dir: str | None = None,
+) -> tuple[list[Conversation], list[str], dict[str, Any]]:
+    """Load conversations with per-example source labels ('gsm8k', 'tulu', 'code')."""
+    cache_dir = cache_dir or _cache_dir()
+    gsm = load_gsm8k_conversations(n_gsm8k, seed, cache_dir=cache_dir)
+    tulu = load_tulu_conversations(n_tulu, seed, cache_dir=cache_dir)
+    code = load_opencode_conversations(n_code, seed, cache_dir=cache_dir)
+    conversations = gsm + tulu + code
+    labels = ["gsm8k"] * len(gsm) + ["tulu"] * len(tulu) + ["code"] * len(code)
+    stats = _build_stats(n_gsm8k, n_tulu, n_code, gsm, tulu, code, seed, cache_dir)
+    return conversations, labels, stats
