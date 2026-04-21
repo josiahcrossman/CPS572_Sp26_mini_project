@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import time
 from collections import defaultdict
@@ -105,6 +106,19 @@ def _fmt_time(seconds: float) -> str:
     return f"{seconds / 3600:.1f}h"
 
 
+def _lr_at_step(
+    step: int, total_steps: int, peak_lr: float, warmup: int, min_ratio: float
+) -> float:
+    """Linear warmup for `warmup` steps, then cosine decay from peak_lr down
+    to peak_lr * min_ratio over the remaining steps."""
+    if warmup > 0 and step < warmup:
+        return peak_lr * (step + 1) / warmup
+    progress = (step - warmup) / max(1, total_steps - warmup)
+    progress = min(max(progress, 0.0), 1.0)
+    cos = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return peak_lr * (min_ratio + (1.0 - min_ratio) * cos)
+
+
 # ── Main ──────────────────────────────────────────────────────────────
 
 
@@ -123,6 +137,7 @@ def main():
     parser.add_argument("--n_gsm8k", type=int, default=2500)
     parser.add_argument("--n_tulu", type=int, default=2500)
     parser.add_argument("--n_code", type=int, default=2500)
+    parser.add_argument("--use_gsm8k_only", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--shuffle_datums_seed", type=int, default=None)
     parser.add_argument("--max_length", type=int, default=2048)
@@ -173,12 +188,61 @@ def main():
         help="Step to resume from (adjusts data offset and counters)",
     )
 
+    # Curriculum
+    parser.add_argument(
+        "--curriculum",
+        action="store_true",
+        help="Enable per-datum curriculum sampling (upweight high-loss examples)",
+    )
+    parser.add_argument(
+        "--curriculum_weight",
+        type=float,
+        default=2.0,
+        help="Scale factor for loss-based upweighting (e.g. 2.0 means an example "
+             "with loss=1.0 gets 3x the base sampling probability)",
+    )
+    parser.add_argument(
+        "--curriculum_from_run",
+        type=str,
+        default=None,
+        help="Path to a checkpoint_info.json (or 'latest' for the default one). "
+             "Reads per-task final EMA losses and rescales --n_gsm8k/--n_tulu/--n_code "
+             "proportionally so the weakest task gets more data.",
+    )
+
     args = parser.parse_args()
 
     run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S")
     shuffle_d = (
         args.shuffle_datums_seed if args.shuffle_datums_seed is not None else args.seed
     )
+
+    # ── Inter-task curriculum: adjust data mix from a previous run ────
+
+    if args.curriculum_from_run:
+        info_path_src = (
+            os.path.join(EVAL_DIR, "checkpoint_info.json")
+            if args.curriculum_from_run == "latest"
+            else args.curriculum_from_run
+        )
+        with open(info_path_src, encoding="utf-8") as _f:
+            _prev = json.load(_f)
+        _task_ema = _prev.get("final_task_ema", {})
+        _total_n = args.n_gsm8k + args.n_tulu + args.n_code
+        _losses = {
+            "gsm8k": _task_ema.get("gsm8k") or 1.0,
+            "tulu": _task_ema.get("tulu") or 1.0,
+            "code": _task_ema.get("code") or 1.0,
+        }
+        _loss_sum = sum(_losses.values())
+        args.n_gsm8k = int(round(_total_n * _losses["gsm8k"] / _loss_sum))
+        args.n_tulu = int(round(_total_n * _losses["tulu"] / _loss_sum))
+        args.n_code = max(1, _total_n - args.n_gsm8k - args.n_tulu)
+        print(
+            f"Inter-task curriculum (from {info_path_src}): "
+            f"gsm8k={args.n_gsm8k}, tulu={args.n_tulu}, code={args.n_code} "
+            f"(prev losses: {_losses})"
+        )
 
     # ── Model & renderer ─────────────────────────────────────────────
 
@@ -193,7 +257,7 @@ def main():
     print("Loading mixed SFT data (train splits only)...")
     conversations, source_labels, data_stats = (
         sft_data.load_mixed_sft_conversations_tagged(
-            args.n_gsm8k, args.n_tulu, args.n_code, args.seed,
+            args.n_gsm8k, args.n_tulu, args.n_code, args.seed, use_gsm8k_only=args.use_gsm8k_only,
         )
     )
     print(
@@ -238,6 +302,12 @@ def main():
     else:
         print("  Validation: disabled (--val_fraction 0)")
 
+    # Per-datum loss EMA and seen mask for curriculum sampling
+    datum_ema_loss = np.zeros(len(train_data))
+    datum_seen = np.zeros(len(train_data), dtype=bool)
+    if args.curriculum:
+        print(f"  Curriculum sampling: enabled (weight={args.curriculum_weight})")
+
     # ── Training client ───────────────────────────────────────────────
 
     print(f"Creating LoRA training client (rank={args.rank})...")
@@ -251,10 +321,6 @@ def main():
         print("  State loaded")
 
     # ── Training loop ─────────────────────────────────────────────────
-
-    adam_params = types.AdamParams(
-        learning_rate=args.lr, beta1=0.9, beta2=0.95, eps=1e-8,
-    )
 
     samples_total = args.num_steps * args.batch_size
     data_coverage = min(1.0, samples_total / len(train_data)) if train_data else 0
@@ -285,10 +351,26 @@ def main():
     t0 = time.time()
 
     for step in range(start_step, args.num_steps):
-        idx = (step * args.batch_size) % len(train_data)
-        batch_indices = [(idx + j) % len(train_data) for j in range(args.batch_size)]
+        if args.curriculum:
+            _seen_weights = 1.0 + args.curriculum_weight * datum_ema_loss[datum_seen]
+            _unseen_weight = float(_seen_weights.mean()) if datum_seen.any() else 1.0
+            _weights = np.where(datum_seen, 1.0 + args.curriculum_weight * datum_ema_loss, _unseen_weight)
+            _probs = _weights / _weights.sum()
+            batch_indices = rng.choice(
+                len(train_data), size=args.batch_size, replace=False, p=_probs
+            ).tolist()
+        else:
+            idx = (step * args.batch_size) % len(train_data)
+            batch_indices = [(idx + j) % len(train_data) for j in range(args.batch_size)]
         batch = [train_data[i] for i in batch_indices]
         batch_labels = [train_labels[i] for i in batch_indices]
+
+        lr_now = _lr_at_step(
+            step, args.num_steps, args.lr, warmup=100, min_ratio=0.1,
+        )
+        adam_params = types.AdamParams(
+            learning_rate=lr_now, beta1=0.9, beta2=0.95, eps=1e-8,
+        )
 
         fwd_bwd_future = tc.forward_backward(batch, loss_fn="cross_entropy")
         optim_future = tc.optim_step(adam_params)
@@ -304,6 +386,14 @@ def main():
             prev = ema_task[src]
             ema_task[src] = dl if prev is None else ema_alpha * dl + (1 - ema_alpha) * prev
             task_sample_counts[src] += 1
+
+        # Update per-datum loss EMA and seen mask for curriculum sampling
+        if args.curriculum:
+            for idx_i, dl in zip(batch_indices, datum_losses):
+                datum_ema_loss[idx_i] = (
+                    ema_alpha * dl + (1 - ema_alpha) * datum_ema_loss[idx_i]
+                )
+            datum_seen[batch_indices] = True
 
         ema_loss = loss if ema_loss is None else ema_alpha * loss + (1 - ema_alpha) * ema_loss
 
@@ -330,11 +420,20 @@ def main():
                 f"Step {step + 1}/{args.num_steps}",
                 f"loss={loss:.4f}",
                 f"ema={ema_loss:.4f}",
+                f"lr={lr_now:.2e}",
             ]
             for t in TASKS:
                 if ema_task[t] is not None:
                     parts.append(f"{t}={ema_task[t]:.4f}")
             parts.append(f"[{rate:.1f} step/s, eta {_fmt_time(eta)}]")
+            if args.curriculum:
+                _cw = 1.0 + args.curriculum_weight * datum_ema_loss
+                _ess = float((_cw.sum() ** 2) / (_cw ** 2).sum())
+                _cv = float(_cw.std() / _cw.mean())
+                parts.append(
+                    f"ESS={_ess:.0f}/{len(train_data)} CV={_cv:.2f} "
+                    f"seen={datum_seen.sum()}"
+                )
             print("  " + " | ".join(parts))
 
         # ── Validation ────────────────────────────────────────────────
@@ -348,7 +447,7 @@ def main():
                 vlbls = val_labels[vstart : vstart + args.batch_size]
                 if not vbatch:
                     break
-                vfwd = tc.forward_backward(vbatch, loss_fn="cross_entropy")
+                vfwd = tc.forward(vbatch, loss_fn="cross_entropy")
                 vresult = vfwd.result()
                 for vl, vs in zip(
                     _compute_per_datum_losses(vresult, vbatch), vlbls
@@ -433,13 +532,13 @@ def main():
     training_weights_path = train_ckpt.path
     print(f"  Training weights saved (for GRPO / load_state): {training_weights_path}")
 
-    if not args.no_publish:
-        print("\nPublishing final checkpoint...")
-        rest_client = sc.create_rest_client()
-        rest_client.publish_checkpoint_from_tinker_path(checkpoint_path).result()
-        print("  Published successfully!")
-    else:
-        print("\nSkipping publish (--no_publish).")
+    # if not args.no_publish:
+    #     print("\nPublishing final checkpoint...")
+    #     rest_client = sc.create_rest_client()
+    #     rest_client.publish_checkpoint_from_tinker_path(checkpoint_path).result()
+    #     print("  Published successfully!")
+    # else:
+    #     print("\nSkipping publish (--no_publish).")
 
     # ── Persist metadata ──────────────────────────────────────────────
 
@@ -471,6 +570,19 @@ def main():
             "n_val": len(val_data),
         },
         "published": not args.no_publish,
+        "curriculum": {
+            "enabled": args.curriculum,
+            "weight": args.curriculum_weight,
+            "from_run": args.curriculum_from_run,
+            "final_datum_ema_loss_stats": {
+                "mean": float(datum_ema_loss.mean()),
+                "std": float(datum_ema_loss.std()),
+                "max": float(datum_ema_loss.max()),
+                "p90": float(np.percentile(datum_ema_loss, 90)),
+                "n_seen": int(datum_seen.sum()),
+                "n_unseen": int((~datum_seen).sum()),
+            } if args.curriculum else None,
+        },
         "final_ema_loss": ema_loss,
         "final_task_ema": {t: ema_task[t] for t in TASKS},
         "best_val": (
