@@ -532,13 +532,13 @@ def main():
     training_weights_path = train_ckpt.path
     print(f"  Training weights saved (for GRPO / load_state): {training_weights_path}")
 
-    # if not args.no_publish:
-    #     print("\nPublishing final checkpoint...")
-    #     rest_client = sc.create_rest_client()
-    #     rest_client.publish_checkpoint_from_tinker_path(checkpoint_path).result()
-    #     print("  Published successfully!")
-    # else:
-    #     print("\nSkipping publish (--no_publish).")
+    if not args.no_publish:
+        print("\nPublishing final checkpoint...")
+        rest_client = sc.create_rest_client()
+        rest_client.publish_checkpoint_from_tinker_path(checkpoint_path).result()
+        print("  Published successfully!")
+    else:
+        print("\nSkipping publish (--no_publish).")
 
     # ── Persist metadata ──────────────────────────────────────────────
 
