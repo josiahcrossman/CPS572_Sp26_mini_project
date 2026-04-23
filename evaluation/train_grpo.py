@@ -45,8 +45,13 @@ import tinker
 from datasets import load_dataset
 from tinker import types
 from tinker_cookbook import model_info, renderers
-from tinker_cookbook.supervised.data import datum_from_model_input_weights
+from tinker_cookbook.supervised.data import conversation_to_datum, datum_from_model_input_weights
 from tinker_cookbook.tokenizer_utils import get_tokenizer
+
+try:
+    from . import sft_data
+except ImportError:
+    import sft_data
 
 EVAL_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CHECKPOINT_INFO = os.path.join(EVAL_DIR, "checkpoint_info.json")
@@ -413,6 +418,135 @@ def make_grpo_loss(clip_eps: float, meta: list[tuple[float, float, int]]):
     return grpo_loss
 
 
+REGRESSION_TASKS = ("tulu", "code")
+
+
+def build_regression_sets(
+    renderer,
+    *,
+    max_length: int,
+    n_per_task: int,
+    seed: int,
+    cache_dir: str | None,
+) -> dict[str, list[types.Datum]]:
+    """Load held-out slices from the TRAIN splits of tulu-3 and OpenCodeInstruct,
+    pack them into datums, and return them keyed by task.
+
+    These datums are used only for NLL measurement during GRPO — they never
+    flow into training gradients. The seed is offset from the GRPO seed so
+    these examples don't overlap the GSM8K batch order (they come from
+    different datasets anyway).
+    """
+    if n_per_task <= 0:
+        return {t: [] for t in REGRESSION_TASKS}
+
+    print(f"Building regression check sets ({n_per_task} per task from train splits)...")
+    tulu_convos = sft_data.load_tulu_conversations(n_per_task, seed, cache_dir=cache_dir)
+    code_convos = sft_data.load_opencode_conversations(n_per_task, seed, cache_dir=cache_dir)
+
+    def _pack(convos):
+        out: list[types.Datum] = []
+        for convo in convos:
+            try:
+                d = conversation_to_datum(
+                    convo,
+                    renderer,
+                    max_length=max_length,
+                    train_on_what=renderers.TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+                )
+                out.append(d)
+            except Exception:
+                continue
+        return out
+
+    sets = {"tulu": _pack(tulu_convos), "code": _pack(code_convos)}
+    print(f"  tulu regression datums: {len(sets['tulu'])}")
+    print(f"  code regression datums: {len(sets['code'])}")
+    return sets
+
+
+_ALIGNMENT_DEBUG_PRINTED = False
+
+
+def _datum_nll(sampler, datum: types.Datum) -> float | None:
+    """Mean NLL of a single SFT datum under `sampler`.
+
+    `sampler.compute_logprobs` returns per-token logprobs. Different tinker
+    datum builders produce weights at different lengths:
+      - `datum_from_model_input_weights` → weights length = tokens length - 1
+        (logprob at index 0 has no prior context and is dropped)
+      - `conversation_to_datum` → weights length = tokens length
+        (weight[0] is masked to 0 so position 0 contributes nothing)
+    Handle both: align the tail of full_logprobs with weights.
+    Prints the observed alignment on the first call so any further mismatch
+    is diagnosable.
+    """
+    global _ALIGNMENT_DEBUG_PRINTED
+    weights = datum.loss_fn_inputs["weights"].data
+    try:
+        full_logprobs = sampler.compute_logprobs(datum.model_input).result()
+    except Exception as e:
+        if not _ALIGNMENT_DEBUG_PRINTED:
+            print(f"  [regression] compute_logprobs raised: {type(e).__name__}: {e}")
+            _ALIGNMENT_DEBUG_PRINTED = True
+        return None
+
+    L_lp = len(full_logprobs)
+    L_w = len(weights)
+    if L_lp == L_w:
+        aligned = full_logprobs
+    elif L_lp == L_w + 1:
+        aligned = full_logprobs[1:]
+    elif L_lp > L_w:
+        aligned = full_logprobs[-L_w:]
+    else:
+        if not _ALIGNMENT_DEBUG_PRINTED:
+            print(f"  [regression] length mismatch: logprobs={L_lp}, weights={L_w}")
+            _ALIGNMENT_DEBUG_PRINTED = True
+        return None
+
+    if not _ALIGNMENT_DEBUG_PRINTED:
+        print(
+            f"  [regression] alignment ok: logprobs={L_lp}, weights={L_w} "
+            f"(using last {len(aligned)})"
+        )
+        _ALIGNMENT_DEBUG_PRINTED = True
+
+    total = 0.0
+    n_active = 0
+    for lp, w in zip(aligned, weights, strict=True):
+        if w <= 0:
+            continue
+        if lp is None:
+            return None
+        total += float(lp) * float(w)
+        n_active += 1
+    if n_active == 0:
+        return None
+    return float(-total / n_active)
+
+
+def run_regression_check(
+    sampler,
+    regression_sets: dict[str, list[types.Datum]],
+) -> dict[str, float | None]:
+    """Mean NLL per task on the held-out regression sets. Returns None for a
+    task if every datum fails to score (extremely unlikely but possible if
+    logprob alignment fails)."""
+    out: dict[str, float | None] = {}
+    for task, datums in regression_sets.items():
+        if not datums:
+            out[task] = None
+            continue
+        losses: list[float] = []
+        for d in datums:
+            nll = _datum_nll(sampler, d)
+            if nll is not None:
+                losses.append(nll)
+        out[task] = float(np.mean(losses)) if losses else None
+    return out
+
+
 def evaluate_dev_reward(
     sampler,
     tokenizer,
@@ -471,6 +605,25 @@ def main() -> None:
     parser.add_argument("--train_size", type=int, default=None)
     parser.add_argument("--dev_eval_size", type=int, default=64)
     parser.add_argument("--snapshot_ttl_seconds", type=int, default=86400)
+    parser.add_argument(
+        "--regression_n_per_task",
+        type=int,
+        default=32,
+        help="Held-out datums per non-GSM8K task (tulu, code) used for NLL "
+             "regression checks. Set to 0 to disable.",
+    )
+    parser.add_argument(
+        "--regression_max_length",
+        type=int,
+        default=2048,
+        help="Max token length for packing regression datums (match SFT).",
+    )
+    parser.add_argument(
+        "--regression_warn_pct",
+        type=float,
+        default=0.15,
+        help="Warn if NLL on tulu/code rises by more than this fraction vs. baseline.",
+    )
     args = parser.parse_args()
 
     info: dict[str, Any] = {}
@@ -524,9 +677,34 @@ def main() -> None:
     print(f"  Train prompts: {len(train_records)}")
     print(f"  Held-out train dev prompts: {len(dev_records)}")
 
+    regression_sets = build_regression_sets(
+        renderer,
+        max_length=args.regression_max_length,
+        n_per_task=args.regression_n_per_task,
+        seed=args.seed + 101,
+        cache_dir=cache_dir,
+    )
+    have_regression = any(len(v) > 0 for v in regression_sets.values())
+
     print("Creating training client from checkpoint path (weights only)...")
     sc = tinker.ServiceClient()
     tc = sc.create_training_client_from_state(resume_path)
+
+    # Baseline regression NLL from the SFT checkpoint BEFORE any GRPO updates.
+    regression_baseline: dict[str, float | None] = {t: None for t in REGRESSION_TASKS}
+    if have_regression:
+        print("Measuring baseline regression NLL on pre-GRPO (SFT) checkpoint...")
+        baseline_snapshot = tc.save_weights_for_sampler(
+            name=f"{args.run_id or time.strftime('%Y%m%d-%H%M%S')}-regression-baseline",
+            ttl_seconds=args.snapshot_ttl_seconds,
+        ).result()
+        baseline_sampler = sc.create_sampling_client(model_path=baseline_snapshot.path)
+        regression_baseline = run_regression_check(baseline_sampler, regression_sets)
+        base_str = " ".join(
+            f"{t}={regression_baseline[t]:.4f}" if regression_baseline[t] is not None else f"{t}=n/a"
+            for t in REGRESSION_TASKS
+        )
+        print(f"  Baseline NLL: {base_str}")
 
     adam_params = types.AdamParams(
         learning_rate=args.lr,
@@ -682,6 +860,7 @@ def main() -> None:
             saved = tc.save_weights_for_sampler(name=checkpoint_name).result()
             print(f"  Saved GRPO checkpoint: {saved.path}")
 
+            dev_sampler = None
             dev_acc = None
             if args.dev_eval_size > 0 and dev_records:
                 dev_sampler = sc.create_sampling_client(model_path=saved.path)
@@ -694,6 +873,32 @@ def main() -> None:
                     max_tokens=args.max_tokens,
                 )
                 print(f"  Held-out train dev accuracy ({min(args.dev_eval_size, len(dev_records))} ex): {dev_acc:.4f}")
+
+            regression_nll: dict[str, float | None] = {t: None for t in REGRESSION_TASKS}
+            regression_delta_pct: dict[str, float | None] = {t: None for t in REGRESSION_TASKS}
+            if have_regression:
+                if dev_sampler is None:
+                    dev_sampler = sc.create_sampling_client(model_path=saved.path)
+                regression_nll = run_regression_check(dev_sampler, regression_sets)
+                parts: list[str] = []
+                regressions: list[str] = []
+                for t in REGRESSION_TASKS:
+                    cur = regression_nll[t]
+                    base = regression_baseline.get(t)
+                    if cur is None or base is None or base <= 0:
+                        parts.append(f"{t}=n/a")
+                        continue
+                    delta_pct = (cur - base) / base
+                    regression_delta_pct[t] = float(delta_pct)
+                    parts.append(f"{t} NLL={cur:.4f} (Δ{delta_pct:+.1%} vs baseline)")
+                    if delta_pct > args.regression_warn_pct:
+                        regressions.append(t)
+                print(f"  Regression check: {' | '.join(parts)}")
+                if regressions:
+                    print(
+                        f"  WARNING: {', '.join(regressions)} NLL rose more than "
+                        f"{args.regression_warn_pct:.0%} — model may be overfitting to GSM8K."
+                    )
 
             entry = {
                 "run_id": run_id,
@@ -712,6 +917,9 @@ def main() -> None:
                 "skipped_groups": skipped_groups,
                 "metrics": metrics,
                 "dev_accuracy": dev_acc,
+                "regression_nll": regression_nll,
+                "regression_nll_baseline": dict(regression_baseline),
+                "regression_delta_pct": regression_delta_pct,
                 "training": {
                     "group_size": args.group_size,
                     "prompts_per_step": args.prompts_per_step,
