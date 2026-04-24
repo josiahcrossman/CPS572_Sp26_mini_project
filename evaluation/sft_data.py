@@ -252,7 +252,11 @@ def load_openmath_conversations(
         n_contaminated,
         n_gsm8k_loaded,
     )
-
+    # final sanity check to make sure no contamination
+    for problem in convos:
+        if _word_ngrams(problem[0]["content"], ngram_size) & test_ngrams:
+            print(f"Contaminated: {problem[0]['content']}")
+            print("double contaminated")
     return convos
 
 

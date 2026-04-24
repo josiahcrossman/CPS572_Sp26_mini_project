@@ -1,25 +1,28 @@
 {
-  "checkpoint_path": "tinker://7e353eb6-2e3e-5790-a217-e2e41da4f59b:train:0/sampler_weights/sft-final",
+  "checkpoint_path": "tinker://ea1bc21b-50ea-5761-9911-dfa12415fc83:train:0/sampler_weights/curriculum_extra_data_long_final_v2",
+  "training_weights_path": "tinker://ea1bc21b-50ea-5761-9911-dfa12415fc83:train:0/weights/curriculum_extra_data_long_final_v2",
   "base_model": "meta-llama/Llama-3.1-8B",
   "renderer_name": "role_colon",
   "training": {
-    "num_steps": 500,
-    "batch_size": 4,
+    "num_steps": 4000,
+    "batch_size": 16,
     "learning_rate": 0.0001,
     "lora_rank": 32,
     "max_length": 2048,
     "seed": 42,
     "shuffle_datums_seed": 42,
-    "save_every": 0,
-    "run_id": "20260406-000702"
+    "save_every": 500,
+    "run_id": "20260423-193759",
+    "val_fraction": 0.05,
+    "resume_from": null
   },
   "data": {
-    "n_gsm8k_requested": 3000,
-    "n_tulu_requested": 3000,
-    "n_code_requested": 3000,
-    "n_gsm8k_loaded": 3000,
-    "n_tulu_loaded": 3000,
-    "n_code_loaded": 3000,
+    "n_gsm8k_requested": 10000,
+    "n_tulu_requested": 10000,
+    "n_code_requested": 10000,
+    "n_gsm8k_loaded": 5000,
+    "n_tulu_loaded": 9994,
+    "n_code_loaded": 10000,
     "seed": 42,
     "cache_dir": null,
     "sources": [
@@ -28,9 +31,173 @@
       "nvidia/OpenCodeInstruct (train)"
     ],
     "skipped_datum_errors": 0,
-    "n_datums": 9000,
-    "n_conversations": 9000
+    "n_datums": 29994,
+    "n_conversations": 29994,
+    "n_train": 28495,
+    "n_val": 1499
   },
   "published": true,
-  "intermediate_checkpoints": []
+  "curriculum": {
+    "enabled": true,
+    "weight": 2.0,
+    "from_run": null,
+    "final_datum_ema_loss_stats": {
+      "mean": 0.04640089879102394,
+      "std": 0.05956878651814956,
+      "max": 0.9403080185623439,
+      "p90": 0.1073385304651238,
+      "n_seen": 25438,
+      "n_unseen": 3057
+    }
+  },
+  "final_ema_loss": 0.4034849041875134,
+  "final_task_ema": {
+    "gsm8k": 0.2963110077661231,
+    "tulu": 0.559257964840904,
+    "code": 0.12705770683512438
+  },
+  "best_val": {
+    "loss": 0.48776276153607584,
+    "step": 2500
+  },
+  "val_history": [
+    {
+      "step": 500,
+      "val_loss": 0.512628920199994,
+      "val_gsm8k": 0.4687563963389415,
+      "val_tulu": 0.8629232884328939,
+      "val_code": 0.24371886179467409
+    },
+    {
+      "step": 1000,
+      "val_loss": 0.49659939550797977,
+      "val_gsm8k": 0.44605384533692777,
+      "val_tulu": 0.8445403601538171,
+      "val_code": 0.2358032350826553
+    },
+    {
+      "step": 1500,
+      "val_loss": 0.4927195902210811,
+      "val_gsm8k": 0.43780596509914965,
+      "val_tulu": 0.8450719473704827,
+      "val_code": 0.23199081353997372
+    },
+    {
+      "step": 2000,
+      "val_loss": 0.49148998520717796,
+      "val_gsm8k": 0.4363952497353681,
+      "val_tulu": 0.8434429276430533,
+      "val_code": 0.23127705111826816
+    },
+    {
+      "step": 2500,
+      "val_loss": 0.48776276153607584,
+      "val_gsm8k": 0.43232741356201904,
+      "val_tulu": 0.8379829729282005,
+      "val_code": 0.2293847583083783
+    },
+    {
+      "step": 3000,
+      "val_loss": 0.4937233986497786,
+      "val_gsm8k": 0.43858402759262777,
+      "val_tulu": 0.8507227837684417,
+      "val_code": 0.2291047465281915
+    },
+    {
+      "step": 3500,
+      "val_loss": 0.4930284321675556,
+      "val_gsm8k": 0.43650105973749614,
+      "val_tulu": 0.850567012116861,
+      "val_code": 0.22919115238589785
+    },
+    {
+      "step": 4000,
+      "val_loss": 0.497333075641121,
+      "val_gsm8k": 0.43912171989786625,
+      "val_tulu": 0.8584688443883818,
+      "val_code": 0.23185087463882256
+    }
+  ],
+  "intermediate_checkpoints": [
+    {
+      "run_id": "20260423-193759",
+      "kind": "intermediate",
+      "step": 500,
+      "name": "20260423-193759-step-000500",
+      "checkpoint_path": "tinker://ea1bc21b-50ea-5761-9911-dfa12415fc83:train:0/sampler_weights/20260423-193759-step-000500",
+      "loss": 0.7129574218119703,
+      "ema_loss": 0.530892663983191,
+      "base_model": "meta-llama/Llama-3.1-8B"
+    },
+    {
+      "run_id": "20260423-193759",
+      "kind": "intermediate",
+      "step": 1000,
+      "name": "20260423-193759-step-001000",
+      "checkpoint_path": "tinker://ea1bc21b-50ea-5761-9911-dfa12415fc83:train:0/sampler_weights/20260423-193759-step-001000",
+      "loss": 0.29626707679653086,
+      "ema_loss": 0.44711167822944653,
+      "base_model": "meta-llama/Llama-3.1-8B"
+    },
+    {
+      "run_id": "20260423-193759",
+      "kind": "intermediate",
+      "step": 1500,
+      "name": "20260423-193759-step-001500",
+      "checkpoint_path": "tinker://ea1bc21b-50ea-5761-9911-dfa12415fc83:train:0/sampler_weights/20260423-193759-step-001500",
+      "loss": 0.6004770914896199,
+      "ema_loss": 0.4527445364521522,
+      "base_model": "meta-llama/Llama-3.1-8B"
+    },
+    {
+      "run_id": "20260423-193759",
+      "kind": "intermediate",
+      "step": 2000,
+      "name": "20260423-193759-step-002000",
+      "checkpoint_path": "tinker://ea1bc21b-50ea-5761-9911-dfa12415fc83:train:0/sampler_weights/20260423-193759-step-002000",
+      "loss": 0.270236893354912,
+      "ema_loss": 0.4438703470761681,
+      "base_model": "meta-llama/Llama-3.1-8B"
+    },
+    {
+      "run_id": "20260423-193759",
+      "kind": "intermediate",
+      "step": 2500,
+      "name": "20260423-193759-step-002500",
+      "checkpoint_path": "tinker://ea1bc21b-50ea-5761-9911-dfa12415fc83:train:0/sampler_weights/20260423-193759-step-002500",
+      "loss": 0.6452698362352487,
+      "ema_loss": 0.4906860960768445,
+      "base_model": "meta-llama/Llama-3.1-8B"
+    },
+    {
+      "run_id": "20260423-193759",
+      "kind": "intermediate",
+      "step": 3000,
+      "name": "20260423-193759-step-003000",
+      "checkpoint_path": "tinker://ea1bc21b-50ea-5761-9911-dfa12415fc83:train:0/sampler_weights/20260423-193759-step-003000",
+      "loss": 0.3946962370398333,
+      "ema_loss": 0.41764158420161107,
+      "base_model": "meta-llama/Llama-3.1-8B"
+    },
+    {
+      "run_id": "20260423-193759",
+      "kind": "intermediate",
+      "step": 3500,
+      "name": "20260423-193759-step-003500",
+      "checkpoint_path": "tinker://ea1bc21b-50ea-5761-9911-dfa12415fc83:train:0/sampler_weights/20260423-193759-step-003500",
+      "loss": 0.2202782274145696,
+      "ema_loss": 0.3892307249310989,
+      "base_model": "meta-llama/Llama-3.1-8B"
+    },
+    {
+      "run_id": "20260423-193759",
+      "kind": "intermediate",
+      "step": 4000,
+      "name": "20260423-193759-step-004000",
+      "checkpoint_path": "tinker://ea1bc21b-50ea-5761-9911-dfa12415fc83:train:0/sampler_weights/20260423-193759-step-004000",
+      "loss": 0.7612984818706047,
+      "ema_loss": 0.4034849041875134,
+      "base_model": "meta-llama/Llama-3.1-8B"
+    }
+  ]
 }
